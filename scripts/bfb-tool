@@ -47,7 +47,7 @@ error() {
 
 usage() {
 	cat << EOF
-	Usage: $(basename $0) <action> --bfb <BFB> --psid <PSID>|--opn <OPN>|--all [-p|--profile <Profile>] [-o|--output-dir <dir>] [-f|--output-format <format>] [-B|--output-bfb] [-r|--replace-fw <path>] [-v|--verbose] [-j|--json]
+	Usage: $(basename $0) <action> --bfb <BFB> --psid <PSID>|--opn <OPN>|--all [-p|--profile <Profile>] [-o|--output-dir <dir>] [-f|--output-format <format>] [-B|--output-bfb] [-r|--replace-fw <path>] [--replace-capsule <capsule>] [--extract-bfcfg] [-v|--verbose] [-j|--json]
 
 	action:                 extract, repack or info. The repack action includes extracting and building a new BFB for a specific OPN/PSID
 
@@ -62,6 +62,10 @@ usage() {
 	                        Flat format is the format for NIC mode.
 	--output-bfb <bfb>      Output BFB name
 	--replace-fw <path>     Path to extracted mlnx-fw-updater directory
+	--replace-capsule <cap> Capsule file (.cap) to replace config-image.bfb
+	                        The capsule will be wrapped in a .bfb format automatically
+	--extract-bfcfg         Extract bf.cfg text file from config-image.bfb if exists.
+	                        Uses bundled bfcfg from initramfs if system bfcfg not available
 	-j|--json               Print version info in JSON format
 	-v|--verbose            Verbose mode
 EOF
@@ -69,6 +73,138 @@ EOF
 
 finish() {
 	[ -n "$WDIR" ] && rm -rf "$WDIR"
+}
+
+extract_bf_cfg_from_config_image() {
+	local config_image_bfb=$1
+	local output_dir=$2
+	local initramfs_dir=${3:-""}  # Optional: path to extracted initramfs for chroot fallback
+	local config_extract_dir
+	local capsule_file
+	local bf_cfg_bin
+	local bf_cfg_file
+
+	if [ ! -f "$config_image_bfb" ]; then
+		warn "Config image not found: $config_image_bfb"
+		return 1
+	fi
+
+	# Only process .bfb config images (not .pldm)
+	if [[ ! "$config_image_bfb" =~ \.bfb$ ]]; then
+		if [ $verbose -eq 1 ]; then
+			info "Skipping bf.cfg extraction for non-BFB config image"
+		fi
+		return 0
+	fi
+
+	info "Extracting bf.cfg from config image: $config_image_bfb"
+
+	# Create temporary extraction directory
+	config_extract_dir=$(mktemp -d "${TMPDIR}/bfb/config_extract.XXXXXX")
+
+	# Extract only the capsule from config-image.bfb (more efficient than full extraction)
+	pushd "$config_extract_dir" > /dev/null
+	if ! $MLX_MKBFB -x -n "capsule-v0" "$config_image_bfb" > /dev/null 2>&1; then
+		warn "Failed to extract capsule from config image BFB"
+		popd > /dev/null
+		rm -rf "$config_extract_dir"
+		return 1
+	fi
+
+	# Look for the capsule containing the config
+	capsule_file="$config_extract_dir/dump-capsule-v0"
+	if [ ! -f "$capsule_file" ]; then
+		if [ $verbose -eq 1 ]; then
+			warn "No capsule found in config image"
+		fi
+		popd > /dev/null
+		rm -rf "$config_extract_dir"
+		return 1
+	fi
+
+	# Extract the binary config (skip 168-byte capsule header)
+	bf_cfg_bin="$config_extract_dir/bf.cfg.bin"
+	dd if="$capsule_file" of="$bf_cfg_bin" bs=1 skip=168 2>/dev/null
+
+	# Check for valid config data (magic B^F^^PCH at offset 0x1000)
+	if ! hexdump -C "$bf_cfg_bin" 2>/dev/null | grep -q "B.F..PCH"; then
+		if [ $verbose -eq 1 ]; then
+			warn "No valid bf.cfg data found in capsule"
+		fi
+		popd > /dev/null
+		rm -rf "$config_extract_dir"
+		return 1
+	fi
+
+	# Check if system bfcfg is available
+	local bfcfg_cmd=""
+	local use_chroot=0
+	for cmd in "/usr/bin/bfcfg" "/lib/firmware/mellanox/scripts/bfcfg"; do
+		if [ -x "$cmd" ] && "$cmd" --help 2>&1 | grep -q "bin2cfg"; then
+			bfcfg_cmd="$cmd"
+			break
+		fi
+	done
+	
+	# If no system bfcfg, try using bfcfg from initramfs via chroot
+	if [ -z "$bfcfg_cmd" ] && [ -n "$initramfs_dir" ] && [ -d "$initramfs_dir" ]; then
+		if [ -x "$initramfs_dir/usr/bin/bfcfg" ]; then
+			# Check if we need qemu for ARM emulation (x86 host)
+			if [ "$(uname -m)" != "aarch64" ]; then
+				if [ -x "/usr/bin/qemu-aarch64-static" ]; then
+					cp /usr/bin/qemu-aarch64-static "$initramfs_dir/usr/bin/" 2>/dev/null
+				else
+					popd > /dev/null
+					warn "bfcfg not found and qemu-aarch64-static not available for chroot fallback"
+					rm -rf "$config_extract_dir"
+					return 0
+				fi
+			fi
+			bfcfg_cmd="/usr/bin/bfcfg"
+			use_chroot=1
+			if [ $verbose -eq 1 ]; then
+				info "Using bfcfg from initramfs via chroot"
+			fi
+		fi
+	fi
+	
+	if [ -z "$bfcfg_cmd" ]; then
+		popd > /dev/null
+		warn "bfcfg not found - cannot extract bf.cfg text file from config-image.bfb"
+		warn "Install bfcfg with bin2cfg support to enable bf.cfg extraction"
+		rm -rf "$config_extract_dir"
+		return 0  # Not a fatal error, config-image.bfb was still extracted
+	fi
+	
+	# Use bfcfg -b to convert binary to text
+	bf_cfg_file="$output_dir/bf.cfg"
+	
+	if [ $use_chroot -eq 1 ]; then
+		# Copy bf.cfg.bin into initramfs and run bfcfg via chroot
+		cp "$bf_cfg_bin" "$initramfs_dir/tmp/bf.cfg.bin"
+		chroot "$initramfs_dir" bash -c "cd /tmp && $bfcfg_cmd -b bf.cfg.bin --skip-mfg" > /dev/null 2>&1
+		if [ -f "$initramfs_dir/tmp/bf.cfg.bin.cfg" ]; then
+			mv "$initramfs_dir/tmp/bf.cfg.bin.cfg" "$bf_cfg_file"
+		fi
+		rm -f "$initramfs_dir/tmp/bf.cfg.bin" "$initramfs_dir/tmp/bf.cfg.bin.cfg" 2>/dev/null
+	else
+		# Run bfcfg directly (from temp dir so output goes there)
+		"$bfcfg_cmd" -b "bf.cfg.bin" --skip-mfg > /dev/null 2>&1
+	fi
+	
+	popd > /dev/null
+	
+	if [ -f "$bf_cfg_file" ]; then
+		info "Extracted bf.cfg to: $bf_cfg_file"
+	elif [ -f "${bf_cfg_bin}.cfg" ]; then
+		mv "${bf_cfg_bin}.cfg" "$bf_cfg_file"
+		info "Extracted bf.cfg to: $bf_cfg_file"
+	else
+		warn "Failed to extract bf.cfg from config-image.bfb"
+	fi
+	
+	rm -rf "$config_extract_dir"
+	return 0
 }
 
 replace_mlnx_fw_updater() {
@@ -162,7 +298,7 @@ case "$action" in
 		;;
 esac
 
-options=$(getopt -l "output-dir:,psid:,opn:,bfb:,profile:,output-format:,output-bfb:,replace-fw:,all,help,json,verbose" -o "o:p:O:b:p:f:B:r:ahjv" -a -- "$@")
+options=$(getopt -l "output-dir:,psid:,opn:,bfb:,profile:,output-format:,output-bfb:,replace-fw:,replace-capsule:,extract-bfcfg,all,help,json,verbose" -o "o:p:O:b:p:f:B:r:ahjv" -a -- "$@")
 
 eval set -- "$options"
 
@@ -217,6 +353,13 @@ do
 			shift
 			REPLACE_FW_PATH=$1
 			;;
+		--replace-capsule)
+			shift
+			REPLACE_CAPSULE=$1
+			;;
+		--extract-bfcfg)
+			EXTRACT_BFCFG=1
+			;;
 		--)
 			shift
 			break;;
@@ -225,6 +368,7 @@ do
 done
 
 BUILD_ALL=${BUILD_ALL:-0}
+EXTRACT_BFCFG=${EXTRACT_BFCFG:-0}
 
 unset BSP_CAPSULE
 unset BMC_FW
@@ -256,6 +400,18 @@ if [ -z "$MLX_MKBFB" ]; then
 	error "mlx-mkbfb is required"
 	exit 1
 fi
+
+# Validate --profile and --replace-capsule are not both provided
+if [ -n "$profile" ] && [ -n "$REPLACE_CAPSULE" ]; then
+	error "Cannot use both --profile and --replace-capsule. Choose one."
+	exit 1
+fi
+
+# Convert paths to absolute before we change directories
+bfb=$(realpath "$bfb")
+[ -n "$REPLACE_CAPSULE" ] && REPLACE_CAPSULE=$(realpath "$REPLACE_CAPSULE")
+[ -n "$profile" ] && profile=$(realpath "$profile")
+[ -n "$REPLACE_FW_PATH" ] && REPLACE_FW_PATH=$(realpath "$REPLACE_FW_PATH")
 
 if ! jq --version > /dev/null 2>&1; then
 	error "jq is required"
@@ -364,6 +520,24 @@ fi
 
 if [ -n "$REPLACE_FW_PATH" ]; then
 	replace_mlnx_fw_updater "${INITRAMFS_WDIR}" "${REPLACE_FW_PATH}"
+fi
+
+# Handle --replace-capsule: convert capsule to config-image.bfb
+if [ -n "$REPLACE_CAPSULE" ]; then
+	if [ ! -f "$REPLACE_CAPSULE" ]; then
+		error "Capsule file not found: $REPLACE_CAPSULE"
+		exit 1
+	fi
+	info "Converting capsule to config-image.bfb: $REPLACE_CAPSULE"
+	CAPSULE_BFB="${WDIR}/config-image.bfb"
+	$MLX_MKBFB --capsule "$REPLACE_CAPSULE" "$CAPSULE_BFB"
+	if [ ! -f "$CAPSULE_BFB" ]; then
+		error "Failed to create config-image.bfb from capsule"
+		exit 1
+	fi
+	# Use this as the profile (will be copied to config-image.bfb location)
+	profile="$CAPSULE_BFB"
+	info "Created config-image.bfb from capsule"
 fi
 
 BSP_CAPSULE="./usr/lib/firmware/mellanox/boot/capsule/boot_update2.cap"
@@ -860,6 +1034,11 @@ handle_opn()
 	if [ $? -ne 0 ]; then
 		echo "ERROR: Failed to copy FW binaries to the target dir"
 		exit 1
+	fi
+
+	# Extract bf.cfg from config-image.bfb if --extract-bfcfg flag is set
+	if [ $EXTRACT_BFCFG -eq 1 ] && [ -n "$PROFILE" ] && [[ "$PROFILE" =~ \.bfb$ ]]; then
+		extract_bf_cfg_from_config_image "${TARGET_DIR}/${PROFILE##*/}" "${TARGET_DIR}" "${INITRAMFS_WDIR}"
 	fi
 
 	if [ $REPACK -eq 1 ]; then
