@@ -62,8 +62,9 @@ usage() {
 	                        Flat format is the format for NIC mode.
 	--output-bfb <bfb>      Output BFB name
 	--replace-fw <path>     Path to extracted mlnx-fw-updater directory
-	--replace-capsule <cap> Capsule file (.cap) to replace config-image.bfb
-	                        The capsule will be wrapped in a .bfb format automatically
+	--replace-capsule <cap> Capsule file (.cap) to replace the configuration capsule
+	                        The capsule will be merged with the existing config-image.bfb
+	                        preserving the rest of the components.
 	--extract-bfcfg         Extract bf.cfg text file from config-image.bfb if exists.
 	                        Uses bundled bfcfg from initramfs if system bfcfg not available
 	-j|--json               Print version info in JSON format
@@ -204,6 +205,52 @@ extract_bf_cfg_from_config_image() {
 	fi
 	
 	rm -rf "$config_extract_dir"
+	return 0
+}
+
+# Create a new config-image.bfb by replacing the capsule in an existing one
+# This preserves all Golden Image (preboot) components while updating only the configuration
+# Arguments:
+#   $1 - capsule_file: Path to the new capsule (.cap) file
+#   $2 - output_bfb: Path where the new config-image.bfb will be created
+# Returns:
+#   0 on success, 1 on failure
+create_config_image_from_capsule() {
+	local capsule_file=$1
+	local output_bfb=$2
+	local existing_config_image=""
+
+	if [ ! -f "$capsule_file" ]; then
+		error "Capsule file not found: $capsule_file"
+		return 1
+	fi
+
+	info "Creating config-image.bfb from capsule: $capsule_file"
+
+	# Find existing config-image.bfb to preserve Golden Image (preboot) components
+	if [ -f "./usr/lib/firmware/mellanox/bmc/config-image.bfb" ]; then
+		existing_config_image="./usr/lib/firmware/mellanox/bmc/config-image.bfb"
+	fi
+
+	if [ -z "$existing_config_image" ]; then
+		# Cannot replace capsule if there's no existing config-image.bfb
+		error "No existing config-image.bfb found in this bundle"
+		error "Cannot replace capsule - the bundle does not contain a configuration image"
+		error "Use --profile to add a complete config-image.bfb instead"
+		return 1
+	fi
+
+	# Replace capsule in existing config-image.bfb while preserving all other components
+	# (PSC, BL2, BL31, BL32, BL33, DDR images, certificates, boot settings, etc.)
+	info "Replacing capsule in config-image.bfb while preserving other components"
+	$MLX_MKBFB --capsule "$capsule_file" "$existing_config_image" "$output_bfb"
+
+	if [ ! -f "$output_bfb" ]; then
+		error "Failed to create config-image.bfb from capsule"
+		return 1
+	fi
+
+	info "Successfully created new config-image.bfb with replaced capsule"
 	return 0
 }
 
@@ -524,20 +571,12 @@ fi
 
 # Handle --replace-capsule: convert capsule to config-image.bfb
 if [ -n "$REPLACE_CAPSULE" ]; then
-	if [ ! -f "$REPLACE_CAPSULE" ]; then
-		error "Capsule file not found: $REPLACE_CAPSULE"
-		exit 1
-	fi
-	info "Converting capsule to config-image.bfb: $REPLACE_CAPSULE"
 	CAPSULE_BFB="${WDIR}/config-image.bfb"
-	$MLX_MKBFB --capsule "$REPLACE_CAPSULE" "$CAPSULE_BFB"
-	if [ ! -f "$CAPSULE_BFB" ]; then
-		error "Failed to create config-image.bfb from capsule"
+	if ! create_config_image_from_capsule "$REPLACE_CAPSULE" "$CAPSULE_BFB"; then
 		exit 1
 	fi
 	# Use this as the profile (will be copied to config-image.bfb location)
 	profile="$CAPSULE_BFB"
-	info "Created config-image.bfb from capsule"
 fi
 
 BSP_CAPSULE="./usr/lib/firmware/mellanox/boot/capsule/boot_update2.cap"
