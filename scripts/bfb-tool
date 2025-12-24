@@ -100,8 +100,8 @@ extract_bf_cfg_from_config_image() {
 
 	info "Extracting bf.cfg from config image: $config_image_bfb"
 
-	# Create temporary extraction directory
-	config_extract_dir=$(mktemp -d "${TMPDIR}/bfb/config_extract.XXXXXX")
+	# Create temporary extraction directory inside WDIR for automatic cleanup on exit
+	config_extract_dir=$(mktemp -d "${WDIR}/config_extract.XXXXXX")
 
 	# Extract only the capsule from config-image.bfb (more efficient than full extraction)
 	pushd "$config_extract_dir" > /dev/null
