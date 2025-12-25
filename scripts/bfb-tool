@@ -103,7 +103,11 @@ extract_bf_cfg_from_config_image() {
 	config_extract_dir=$(mktemp -d "${WDIR}/config_extract.XXXXXX")
 
 	# Extract only the capsule from config-image.bfb (more efficient than full extraction)
-	pushd "$config_extract_dir" > /dev/null
+	if ! pushd "$config_extract_dir" > /dev/null; then
+		warn "Failed to change to extraction directory: $config_extract_dir"
+		rm -rf "$config_extract_dir"
+		return 1
+	fi
 	if ! $MLX_MKBFB -x -n "capsule-v0" "$config_image_bfb" > /dev/null 2>&1; then
 		warn "Failed to extract capsule from config image BFB"
 		popd > /dev/null
@@ -170,9 +174,6 @@ extract_bf_cfg_from_config_image() {
 	
 	if [ -f "$bf_cfg_file" ]; then
 		info "Extracted bf.cfg to: $bf_cfg_file"
-	elif [ -f "${bf_cfg_bin}.cfg" ]; then
-		mv "${bf_cfg_bin}.cfg" "$bf_cfg_file"
-		info "Extracted bf.cfg to: $bf_cfg_file"
 	else
 		warn "Failed to extract bf.cfg from config-image.bfb"
 	fi
@@ -181,13 +182,6 @@ extract_bf_cfg_from_config_image() {
 	return 0
 }
 
-# Create a new config-image.bfb by replacing the capsule in an existing one
-# This preserves all Golden Image (preboot) components while updating only the configuration
-# Arguments:
-#   $1 - capsule_file: Path to the new capsule (.cap) file
-#   $2 - output_bfb: Path where the new config-image.bfb will be created
-# Returns:
-#   0 on success, 1 on failure
 create_config_image_from_capsule() {
 	local capsule_file=$1
 	local output_bfb=$2
@@ -200,7 +194,7 @@ create_config_image_from_capsule() {
 
 	info "Creating config-image.bfb from capsule: $capsule_file"
 
-	# Find existing config-image.bfb to preserve Golden Image (preboot) components
+	# Find existing config-image.bfb to preserve all other components
 	if [ -f "./usr/lib/firmware/mellanox/bmc/config-image.bfb" ]; then
 		existing_config_image="./usr/lib/firmware/mellanox/bmc/config-image.bfb"
 	fi
@@ -429,7 +423,13 @@ fi
 
 # Convert paths to absolute before we change directories
 bfb=$(realpath "$bfb")
-[ -n "$REPLACE_CAPSULE" ] && REPLACE_CAPSULE=$(realpath "$REPLACE_CAPSULE")
+if [ -n "$REPLACE_CAPSULE" ]; then
+	if [ ! -f "$REPLACE_CAPSULE" ]; then
+		error "User requested replacement capsule but file not found: $REPLACE_CAPSULE"
+		exit 1
+	fi
+	REPLACE_CAPSULE=$(realpath "$REPLACE_CAPSULE")
+fi
 [ -n "$profile" ] && profile=$(realpath "$profile")
 [ -n "$REPLACE_FW_PATH" ] && REPLACE_FW_PATH=$(realpath "$REPLACE_FW_PATH")
 
