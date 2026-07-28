@@ -73,7 +73,44 @@ EOF
 }
 
 finish() {
+	unbind_mount_chroot_devices
 	[ -n "$WDIR" ] && rm -rf "$WDIR"
+}
+
+# Bind-mount real device nodes from the host into a chroot before running
+# scripts inside it. A chroot's working directory can end up on a 'nodev'
+# filesystem: cpio still creates the device-node inodes, but opening them
+# for I/O then fails with "Permission denied", breaking feature checks such
+# as `which python3 >/dev/null 2>&1` used by some vendored tools. A bind
+# mount takes the *source* mount's permissions, so it works regardless of
+# how the chroot directory itself is mounted.
+CHROOT_DEV_NODES="null zero full random urandom tty"
+CHROOT_BIND_MOUNTS=()
+
+bind_mount_chroot_devices() {
+	local chroot_dir=$1
+	local dev target
+
+	for dev in $CHROOT_DEV_NODES; do
+		target="${chroot_dir}/dev/${dev}"
+		# Only bind real char devices where the chroot already has a node to shadow.
+		[ -c "/dev/${dev}" ] || continue
+		[ -e "$target" ] || continue
+		if mount --bind "/dev/${dev}" "$target" 2> /dev/null; then
+			CHROOT_BIND_MOUNTS+=("$target")
+		elif [ $verbose -eq 1 ]; then
+			warn "Failed to bind-mount /dev/${dev} into ${chroot_dir}/dev"
+		fi
+	done
+}
+
+unbind_mount_chroot_devices() {
+	local target
+
+	for target in "${CHROOT_BIND_MOUNTS[@]}"; do
+		umount "$target" 2> /dev/null
+	done
+	CHROOT_BIND_MOUNTS=()
 }
 
 extract_bf_cfg_from_config_image() {
@@ -538,6 +575,8 @@ cd $INITRAMFS_WDIR
 info "Extracting BFB's initramfs"
 gzip -d < ../dump-initramfs-v0 | cpio -id
 
+bind_mount_chroot_devices "$INITRAMFS_WDIR"
+
 if ! (/bin/ls */install.env/common > /dev/null 2>&1); then
     error "This BFB does not support BMC components update"
     exit 1
@@ -615,6 +654,8 @@ if [ $REPACK -eq 1 ]; then
 	mkdir -p $INITRAMFS_REPKG_DIR
 	cd $INITRAMFS_REPKG_DIR
 	gzip -d < ../dump-initramfs-v0 | cpio -id
+
+	bind_mount_chroot_devices "$INITRAMFS_REPKG_DIR"
 
 	if [ ! -d ./opt/mellanox/mlnx-fw-updater  ]; then
 	    info "Extracting mlnx-fw-updater"
