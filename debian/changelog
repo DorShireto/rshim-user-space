@@ -1,3 +1,12 @@
+rshim (2.9.0) UNRELEASED; urgency=low
+
+  * Move bfb-install, bfb-tool and bf-pldm-ver (and their man pages) to the
+    doca-installer package (>= 2.1.0); /usr/sbin/bfb-install becomes a
+    doca-installer-owned deprecation shim
+  * Declare Breaks: doca-installer (<< 2.1.0)
+
+ -- Dor Shireto <dshireto@nvidia.com>  Tue, 11 Aug 2026 10:16:33 +0300
+
 rshim (2.8.2) UNRELEASED; urgency=low
 
   * rshim: retry stalled boot writes

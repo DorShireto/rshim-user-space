@@ -46,6 +46,10 @@ Requires: kernel-modules-extra
 %endif
 %endif
 
+# doca-installer < 2.1.0 drives /usr/sbin/bfb-install, which this rshim no
+# longer ships; the BFB tools moved to the doca-installer package (>= 2.1.0).
+Conflicts: doca-installer < 2.1.0
+
 %global with_systemd %(if (test -d "%{_unitdir}" > /dev/null); then echo -n '1'; else echo -n '0'; fi)
 %global debug_package %{nil}
 
@@ -200,21 +204,20 @@ fi
   %config(noreplace) %{_sysconfdir}/systemd/network/10-tmfifo-net.link
 %endif
 %{_sbindir}/rshim
-%{_sbindir}/bfb-install
-%{_sbindir}/bfb-tool
 %{_sbindir}/mlx-mkbfb
 %{_sbindir}/bf-reg
-%{_sbindir}/bf-pldm-ver
 %{_sbindir}/fwpkg_unpack.py
 %{_mandir}/man1/mlx-mkbfb.1.gz
 %{_mandir}/man8/rshim.8.gz
-%{_mandir}/man8/bfb-install.8.gz
-%{_mandir}/man8/bfb-tool.8.gz
 %{_mandir}/man8/bf-reg.8.gz
-%{_mandir}/man8/bf-pldm-ver.8.gz
 %{_datadir}/selinux/packages/rshim-fix.te
 
 %changelog
+* Tue Aug 11 2026 Dor Shireto <dshireto@nvidia.com> - 2.9.0
+- Move bfb-install, bfb-tool and bf-pldm-ver to the doca-installer package (>= 2.1.0)
+- /usr/sbin/bfb-install is now a doca-installer-owned deprecation shim
+- Add Conflicts: doca-installer < 2.1.0
+
 * Thu Jul 02 2026 Penghe Geng <pgeng@nvidia.com> - 2.8.2
 - rshim: retry stalled boot writes
 
