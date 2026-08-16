@@ -1,3 +1,10 @@
+Add a new top entry:
+rshim (2.8.5) UNRELEASED; urgency=low
+ 
+  * bfb-install: print BFB-Install deprecation notice to stdout on every run (#420)
+ 
+-- Dor Shireto <dshireto@nvidia.com>  Sun, 16 Aug 2026 14:10:39 +0300
+
 rshim (2.8.4) UNRELEASED; urgency=low
 
   * bfb-tool: bind-mount host device nodes into chroots (#417)
